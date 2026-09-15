@@ -1,4 +1,4 @@
-name: Build Natmapt for OpenWrt 25.12.5 (Optimized)
+name: Build Natmapt for OpenWrt 25.12.5
 
 on:
   workflow_dispatch:
@@ -18,8 +18,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            rsync unzip zlib1g-dev file curl zstd qemu-utils ccache
-          
+            rsync unzip zlib1g-dev file curl zstd qemu-utils ccache bash jq
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           mkdir -p ~/.ccache
           ccache --set-config=max_size=2G
@@ -28,20 +27,11 @@ jobs:
       - name: Download OpenWrt 25.12.5 SDK
         run: |
           SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          
-          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" "$SDK_URL")
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::SDK download failed with HTTP $HTTP_CODE."
-            exit 1
-          fi
-
           curl -fSL --progress-bar "$SDK_URL" -o sdk.tar.zst
           tar --use-compress-program=unzstd -xf sdk.tar.zst
-          
           EXTRACTED_DIR=$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)
           if [ -z "$EXTRACTED_DIR" ]; then
-            echo "::error::Failed to find extracted SDK directory!"
-            ls -la
+            echo "::error::SDK extraction failed!"
             exit 1
           fi
           echo "SDK_DIR=$EXTRACTED_DIR" >> $GITHUB_ENV
@@ -53,57 +43,53 @@ jobs:
             ${{ env.SDK_DIR }}/feeds
             ${{ env.SDK_DIR }}/dl
             ~/.ccache
-          key: openwrt-25.12.5-x86-64-feeds-${{ hashFiles('**/Makefile', '**/patches/**') }}
-          restore-keys: |
-            openwrt-25.12.5-x86-64-feeds-
+          key: openwrt-25.12.5-x86-64-natmapt-${{ hashFiles('**/Makefile') }}
+          restore-keys: openwrt-25.12.5-x86-64-natmapt-
 
-      - name: Configure feeds and package
+      - name: Configure and Build natmapt
         run: |
           cd "${{ env.SDK_DIR }}"
           
-          # 替换为正式 release 源
+          # 切换到正式 release 源
           sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
-          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # ✅ 克隆 natmapt 源码到 SDK package 目录
-          git clone https://github.com/taotaowudi/openwrt-natmapt.git package/openwrt-natmapt
-          
-          make defconfig
-          
-          # 🚀 动态检测包名并写入配置，避免硬编码导致 No rule to make target
-          PKG_NAME=$(grep -E "^define Package/" package/openwrt-natmapt/Makefile 2>/dev/null | head -n1 | awk '{print $3}')
-          if [ -z "$PKG_NAME" ]; then
-            echo "::error::Cannot detect package name from Makefile! Please verify the repository structure."
-            cat package/openwrt-natmapt/Makefile
+          # ✅ 克隆到固定目录名，后续所有命令都基于此目录名
+          PKG_DIR="openwrt-natmapt"
+          git clone https://github.com/taotaowudi/openwrt-natmapt.git "package/${PKG_DIR}"
+
+          # 验证 Makefile 存在
+          if [ ! -f "package/${PKG_DIR}/Makefile" ]; then
+            echo "::error::Makefile not found in package/${PKG_DIR}/"
+            ls -la "package/${PKG_DIR}/" || true
             exit 1
           fi
-          echo "Detected package name: $PKG_NAME"
-          echo "CONFIG_PACKAGE_${PKG_NAME}=y" >> .config
-          echo "CONFIG_CCACHE=y" >> .config
+
           make defconfig
           
-          # 验证包是否被成功选中
-          if ! grep -q "CONFIG_PACKAGE_${PKG_NAME}=y" .config; then
-            echo "::error::Package ${PKG_NAME} was not selected in .config!"
-            exit 1
-          fi
-          echo "✅ Package ${PKG_NAME} successfully registered."
-          echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_ENV
+          # 启用主包及所有子包
+          cat >> .config <<EOF
+          CONFIG_PACKAGE_natmapt=y
+          CONFIG_PACKAGE_natmapt-client-script-transmission=y
+          CONFIG_PACKAGE_natmapt-client-script-deluge=y
+          CONFIG_PACKAGE_natmapt-notify-script-pushbullet=y
+          CONFIG_PACKAGE_natmapt-notify-script-pushover=y
+          CONFIG_PACKAGE_natmapt-notify-script-telegram=y
+          CONFIG_CCACHE=y
+          EOF
+          
+          make defconfig
 
-      - name: Compile natmapt
-        run: |
-          cd "${{ env.SDK_DIR }}"
-          make package/${{ env.PKG_NAME }}/compile -j$(nproc)
+          # ✅ 关键修复：使用目录名而非包名作为编译目标
+          echo "🔨 Compiling package/${PKG_DIR} ..."
+          make "package/${PKG_DIR}/compile" -j$(nproc) V=s
 
-      - name: Upload APK artifacts
+      - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: natmapt-openwrt-25.12.5-x86_64
           path: |
-            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/*natmapt*.apk
-            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libmbedtls*.apk
-            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libjson-c*.apk
+            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/natmapt*.apk
           retention-days: 7
           if-no-files-found: error
