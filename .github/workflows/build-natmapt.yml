@@ -64,29 +64,45 @@ jobs:
           # 替换为正式 release 源
           sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
           
-          # 🚀 如果缓存命中，feeds/dl 已存在，update 会跳过网络拉取仅做校验
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # TODO: 放入你的 natmapt 包源码
-          # git clone https://github.com/your-repo/natmapt.git package/feeds/custom/natmapt
+          # ✅ 克隆 natmapt 源码到 SDK package 目录
+          git clone https://github.com/taotaowudi/openwrt-natmapt.git package/openwrt-natmapt
           
           make defconfig
-          echo "CONFIG_PACKAGE_natmapt=y" >> .config
+          
+          # 🚀 动态检测包名并写入配置，避免硬编码导致 No rule to make target
+          PKG_NAME=$(grep -E "^define Package/" package/openwrt-natmapt/Makefile 2>/dev/null | head -n1 | awk '{print $3}')
+          if [ -z "$PKG_NAME" ]; then
+            echo "::error::Cannot detect package name from Makefile! Please verify the repository structure."
+            cat package/openwrt-natmapt/Makefile
+            exit 1
+          fi
+          echo "Detected package name: $PKG_NAME"
+          echo "CONFIG_PACKAGE_${PKG_NAME}=y" >> .config
           echo "CONFIG_CCACHE=y" >> .config
           make defconfig
+          
+          # 验证包是否被成功选中
+          if ! grep -q "CONFIG_PACKAGE_${PKG_NAME}=y" .config; then
+            echo "::error::Package ${PKG_NAME} was not selected in .config!"
+            exit 1
+          fi
+          echo "✅ Package ${PKG_NAME} successfully registered."
+          echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_ENV
 
       - name: Compile natmapt
         run: |
           cd "${{ env.SDK_DIR }}"
-          make package/natmapt/compile -j$(nproc)
+          make package/${{ env.PKG_NAME }}/compile -j$(nproc)
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: natmapt-openwrt-25.12.5-x86_64
           path: |
-            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/natmapt*.apk
+            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/*natmapt*.apk
             ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libmbedtls*.apk
             ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libjson-c*.apk
           retention-days: 7
