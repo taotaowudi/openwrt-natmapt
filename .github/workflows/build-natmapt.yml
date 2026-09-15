@@ -1,9 +1,13 @@
-name: Build Natmapt for OpenWrt 25.12.5
+name: Build and Release Natmapt for OpenWrt 25.12.5
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
+
+# ⚠️ 必须添加此权限，否则无法创建 Release
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -50,25 +54,19 @@ jobs:
         run: |
           cd "${{ env.SDK_DIR }}"
           
-          # 切换到正式 release 源
           sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # ✅ 克隆到固定目录名，后续所有命令都基于此目录名
           PKG_DIR="openwrt-natmapt"
           git clone https://github.com/taotaowudi/openwrt-natmapt.git "package/${PKG_DIR}"
 
-          # 验证 Makefile 存在
           if [ ! -f "package/${PKG_DIR}/Makefile" ]; then
             echo "::error::Makefile not found in package/${PKG_DIR}/"
-            ls -la "package/${PKG_DIR}/" || true
             exit 1
           fi
 
           make defconfig
-          
-          # 启用主包及所有子包
           cat >> .config <<EOF
           CONFIG_PACKAGE_natmapt=y
           CONFIG_PACKAGE_natmapt-client-script-transmission=y
@@ -78,18 +76,65 @@ jobs:
           CONFIG_PACKAGE_natmapt-notify-script-telegram=y
           CONFIG_CCACHE=y
           EOF
-          
           make defconfig
 
-          # ✅ 关键修复：使用目录名而非包名作为编译目标
           echo "🔨 Compiling package/${PKG_DIR} ..."
           make "package/${PKG_DIR}/compile" -j$(nproc) V=s
 
-      - name: Upload APK Artifacts
-        uses: actions/upload-artifact@v4
+      # ========== 以下为新增的 Release 发布步骤 ==========
+
+      - name: Generate Release Tag
+        id: tag
+        run: |
+          # 使用 日期-短commit号 作为唯一版本号，避免冲突
+          TAG="v$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "🏷️ Release tag: ${TAG}"
+
+      - name: Collect APK Artifacts
+        run: |
+          mkdir -p release_assets
+          find "${{ env.SDK_DIR }}/bin/packages/x86_64/base/" -name "natmapt*.apk" -exec cp {} release_assets/ \;
+          
+          echo "📦 Collected files:"
+          ls -lh release_assets/
+          
+          FILE_COUNT=$(ls -1 release_assets/*.apk 2>/dev/null | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No APK files found for release!"
+            exit 1
+          fi
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: natmapt-openwrt-25.12.5-x86_64
-          path: |
-            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/natmapt*.apk
-          retention-days: 7
-          if-no-files-found: error
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Natmapt OpenWrt 25.12.5 x86_64 (${{ steps.tag.outputs.tag }})
+          body: |
+            ## 📦 Natmapt for OpenWrt 25.12.5 (x86_64)
+            
+            - **OpenWrt Version**: 25.12.5
+            - **Architecture**: x86_64
+            - **Package Format**: APK
+            - **Build Commit**: `${{ github.sha }}`
+            
+            ### 📋 Included Packages
+            - `natmapt` (主程序)
+            - `natmapt-client-script-transmission`
+            - `natmapt-client-script-deluge`
+            - `natmapt-notify-script-pushbullet`
+            - `natmapt-notify-script-pushover`
+            - `natmapt-notify-script-telegram`
+            
+            ### 🚀 Installation
+            ```bash
+            # 上传到路由器后执行
+            apk add --allow-untrusted natmapt-*.apk
+
+            ```
+          files: release_assets/*.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
