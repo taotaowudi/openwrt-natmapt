@@ -5,7 +5,6 @@ on:
   push:
     branches: [ "main" ]
 
-# ⚠️ 必须添加此权限，否则无法创建 Release
 permissions:
   contents: write
 
@@ -17,53 +16,63 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache OpenWrt SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: openwrt-sdk-*
+          key: openwrt-sdk-25.12.5-x86-64-v1
+
+      - name: Download OpenWrt 25.12.5 SDK (if not cached)
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+          curl -fSL --progress-bar "$SDK_URL" -o sdk.tar.zst
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          rm -f sdk.tar.zst
+
+      # ✅ 修复：将 SDK 绝对路径写入固定文件，彻底避免通配符解析问题
+      - name: Set SDK Directory
+        run: |
+          SDK_DIR=$(realpath $(ls -d openwrt-sdk-* | head -n1))
+          echo "$SDK_DIR" > /tmp/sdk_path.txt
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+          echo "📂 SDK path resolved to: $SDK_DIR"
+
       - name: Prepare build environment
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            rsync unzip zlib1g-dev file curl zstd qemu-utils ccache bash jq
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
+            gettext git libncurses-dev libssl-dev rsync unzip zlib1g-dev \
+            curl zstd ccache bash jq > /dev/null 2>&1
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           mkdir -p ~/.ccache
           ccache --set-config=max_size=2G
           ccache --zero-stats
 
-      - name: Download OpenWrt 25.12.5 SDK
-        run: |
-          SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          curl -fSL --progress-bar "$SDK_URL" -o sdk.tar.zst
-          tar --use-compress-program=unzstd -xf sdk.tar.zst
-          EXTRACTED_DIR=$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)
-          if [ -z "$EXTRACTED_DIR" ]; then
-            echo "::error::SDK extraction failed!"
-            exit 1
-          fi
-          echo "SDK_DIR=$EXTRACTED_DIR" >> $GITHUB_ENV
-
-      - name: Restore Feeds & Ccache
+      - name: Restore Build Cache
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.SDK_DIR }}/feeds
             ${{ env.SDK_DIR }}/dl
             ~/.ccache
-          key: openwrt-25.12.5-x86-64-natmapt-${{ hashFiles('**/Makefile') }}
-          restore-keys: openwrt-25.12.5-x86-64-natmapt-
+          key: openwrt-build-cache-25.12.5-${{ hashFiles('**/Makefile') }}
+          restore-keys: openwrt-build-cache-25.12.5-
 
       - name: Configure and Build natmapt
         run: |
           cd "${{ env.SDK_DIR }}"
           
-          sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          if [ ! -d "feeds/packages" ]; then
+            sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a
+          fi
 
           PKG_DIR="openwrt-natmapt"
-          git clone https://github.com/taotaowudi/openwrt-natmapt.git "package/${PKG_DIR}"
-
-          if [ ! -f "package/${PKG_DIR}/Makefile" ]; then
-            echo "::error::Makefile not found in package/${PKG_DIR}/"
-            exit 1
+          if [ ! -d "package/${PKG_DIR}" ]; then
+            git clone --depth=1 https://github.com/taotaowudi/openwrt-natmapt.git "package/${PKG_DIR}"
           fi
 
           make defconfig
@@ -81,27 +90,30 @@ jobs:
           echo "🔨 Compiling package/${PKG_DIR} ..."
           make "package/${PKG_DIR}/compile" -j$(nproc) V=s
 
-      # ========== 以下为新增的 Release 发布步骤 ==========
-
       - name: Generate Release Tag
         id: tag
         run: |
-          # 使用 日期-短commit号 作为唯一版本号，避免冲突
           TAG="v$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "🏷️ Release tag: ${TAG}"
 
+      # ✅ 修复：从固定文件读取路径，不再使用 env 变量拼接通配符
       - name: Collect APK Artifacts
         run: |
+          SDK_DIR=$(cat /tmp/sdk_path.txt)
+          BASE_DIR="${SDK_DIR}/bin/packages/x86_64/base"
+          
+          echo "🔍 Searching in: $BASE_DIR"
+          ls -la "$BASE_DIR" || { echo "::error::Base dir not found!"; exit 1; }
+          
           mkdir -p release_assets
-          find "${{ env.SDK_DIR }}/bin/packages/x86_64/base/" -name "natmapt*.apk" -exec cp {} release_assets/ \;
+          find "$BASE_DIR" -maxdepth 1 -name "natmapt*.apk" -exec cp {} release_assets/ \;
           
           echo "📦 Collected files:"
           ls -lh release_assets/
           
           FILE_COUNT=$(ls -1 release_assets/*.apk 2>/dev/null | wc -l)
           if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "::error::No APK files found for release!"
+            echo "::error::No APK files found!"
             exit 1
           fi
 
@@ -112,23 +124,11 @@ jobs:
           name: Natmapt OpenWrt 25.12.5 x86_64 (${{ steps.tag.outputs.tag }})
           body: |
             ## 📦 Natmapt for OpenWrt 25.12.5 (x86_64)
+            - **OpenWrt**: 25.12.5 | **Arch**: x86_64 | **Format**: APK
+            - **Build**: `${{ github.sha }}`
             
-            - **OpenWrt Version**: 25.12.5
-            - **Architecture**: x86_64
-            - **Package Format**: APK
-            - **Build Commit**: `${{ github.sha }}`
-            
-            ### 📋 Included Packages
-            - `natmapt` (主程序)
-            - `natmapt-client-script-transmission`
-            - `natmapt-client-script-deluge`
-            - `natmapt-notify-script-pushbullet`
-            - `natmapt-notify-script-pushover`
-            - `natmapt-notify-script-telegram`
-            
-            ### 🚀 Installation
+            ### 🚀 Install
             ```bash
-            # 上传到路由器后执行
             apk add --allow-untrusted natmapt-*.apk
 
             ```
