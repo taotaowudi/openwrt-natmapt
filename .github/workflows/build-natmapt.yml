@@ -1,4 +1,4 @@
-name: Build Natmapt for OpenWrt 25.12.5
+name: Build Natmapt for OpenWrt 25.12.5 (Optimized)
 
 on:
   workflow_dispatch:
@@ -18,27 +18,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            rsync unzip zlib1g-dev file curl zstd qemu-utils
-      
+            rsync unzip zlib1g-dev file curl zstd qemu-utils ccache
+          
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
+          mkdir -p ~/.ccache
+          ccache --set-config=max_size=2G
+          ccache --zero-stats
+
       - name: Download OpenWrt 25.12.5 SDK
         run: |
-          # ✅ 已更新为正确的 .tar.zst 链接
           SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           
-          echo "Checking SDK availability..."
           HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" "$SDK_URL")
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::SDK download failed with HTTP $HTTP_CODE. Please verify the release URL."
+            echo "::error::SDK download failed with HTTP $HTTP_CODE."
             exit 1
           fi
 
-          echo "Downloading SDK..."
           curl -fSL --progress-bar "$SDK_URL" -o sdk.tar.zst
-          
-          echo "Extracting SDK (zstd format)..."
           tar --use-compress-program=unzstd -xf sdk.tar.zst
           
-          # 动态获取解压后的SDK目录名
           EXTRACTED_DIR=$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)
           if [ -z "$EXTRACTED_DIR" ]; then
             echo "::error::Failed to find extracted SDK directory!"
@@ -46,29 +45,41 @@ jobs:
             exit 1
           fi
           echo "SDK_DIR=$EXTRACTED_DIR" >> $GITHUB_ENV
-          echo "SDK directory identified: $EXTRACTED_DIR"
 
-      - name: Configure custom feed and package
+      - name: Restore Feeds & Ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SDK_DIR }}/feeds
+            ${{ env.SDK_DIR }}/dl
+            ~/.ccache
+          key: openwrt-25.12.5-x86-64-feeds-${{ hashFiles('**/Makefile', '**/patches/**') }}
+          restore-keys: |
+            openwrt-25.12.5-x86-64-feeds-
+
+      - name: Configure feeds and package
         run: |
           cd "${{ env.SDK_DIR }}"
           
-          # 强制替换 feeds.conf.default 中的源地址为正式 release 版
+          # 替换为正式 release 源
           sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
           
+          # 🚀 如果缓存命中，feeds/dl 已存在，update 会跳过网络拉取仅做校验
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # TODO: 将你的 natmapt 包源码放入此处
+          # TODO: 放入你的 natmapt 包源码
           # git clone https://github.com/your-repo/natmapt.git package/feeds/custom/natmapt
           
           make defconfig
           echo "CONFIG_PACKAGE_natmapt=y" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
           make defconfig
 
       - name: Compile natmapt
         run: |
           cd "${{ env.SDK_DIR }}"
-          make package/natmapt/compile V=s -j$(nproc)
+          make package/natmapt/compile -j$(nproc)
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
