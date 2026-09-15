@@ -18,47 +18,62 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            rsync unzip zlib1g-dev file wget qemu-utils
+            rsync unzip zlib1g-dev file curl qemu-utils
       
       - name: Download OpenWrt 25.12.5 SDK
         run: |
-          # 使用正式发布版的SDK路径
+          # ⚠️ 请务必先在浏览器验证此URL是否有效！
           SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.xz"
-          echo "Downloading SDK from: $SDK_URL"
-          wget -q "$SDK_URL" -O sdk.tar.xz
+          
+          echo "Checking SDK availability..."
+          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" "$SDK_URL")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::SDK download failed with HTTP $HTTP_CODE. Please verify the release URL."
+            exit 1
+          fi
+
+          echo "Downloading SDK..."
+          curl -fSL --progress-bar "$SDK_URL" -o sdk.tar.xz
+          
+          echo "Extracting SDK..."
           tar -xf sdk.tar.xz
-          # 动态获取解压后的SDK目录名，避免硬编码
-          echo "SDK_DIR=$(ls -d openwrt-sdk-* | head -n1)" >> $GITHUB_ENV
+          
+          # 动态获取解压后的SDK目录名
+          EXTRACTED_DIR=$(ls -d openwrt-sdk-* 2>/dev/null | head -n1)
+          if [ -z "$EXTRACTED_DIR" ]; then
+            echo "::error::Failed to find extracted SDK directory!"
+            ls -la
+            exit 1
+          fi
+          echo "SDK_DIR=$EXTRACTED_DIR" >> $GITHUB_ENV
+          echo "SDK directory identified: $EXTRACTED_DIR"
 
       - name: Configure custom feed and package
         run: |
-          cd ${{ env.SDK_DIR }}
+          cd "${{ env.SDK_DIR }}"
           
-          # 更新官方base和packages源 (使用正确的release路径)
+          # 强制替换 feeds.conf.default 中的源地址为正式 release 版
           sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 克隆或复制你的 natmapt 包源码到 package/feeds/custom/
-          # 示例：git clone https://github.com/your-repo/natmapt.git package/feeds/custom/natmapt
+          # TODO: 将你的 natmapt 包源码放入此处
+          # git clone https://github.com/your-repo/natmapt.git package/feeds/custom/natmapt
           
-          # 生成默认配置并选择natmapt
           make defconfig
           echo "CONFIG_PACKAGE_natmapt=y" >> .config
           make defconfig
 
       - name: Compile natmapt
         run: |
-          cd ${{ env.SDK_DIR }}
-          # V=s 输出详细日志便于排查，单线程编译提高稳定性
-          make package/natmapt/compile V=s -j1
+          cd "${{ env.SDK_DIR }}"
+          make package/natmapt/compile V=s -j$(nproc)
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: natmapt-openwrt-25.12.5-x86_64
-          # 匹配所有生成的apk文件，包括主程序和依赖
           path: |
             ${{ env.SDK_DIR }}/bin/packages/x86_64/base/natmapt*.apk
             ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libmbedtls*.apk
