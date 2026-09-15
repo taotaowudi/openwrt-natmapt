@@ -1,64 +1,67 @@
-name: Build natmapt for OpenWrt 25.12
+name: Build Natmapt for OpenWrt 25.12.5
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/build-natmapt.yml'
-
-env:
-  OPENWRT_VERSION: "25.12-SNAPSHOT"
-  TARGET: "x86_64"       # ← 根据你的目标设备修改，如 aarch64_generic, mipsel_24kc 等
-  PACKAGE_NAME: "natmapt"
-  REPO_URL: "https://github.com/taotaowudi/openwrt-natmapt.git"
+    branches: [ "main" ]
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Prepare build environment
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-distutils python3-setuptools rsync swig unzip zlib1g-dev \
-            file wget qemu-utils
-
-      - name: Download OpenWrt SDK
+            rsync unzip zlib1g-dev file wget qemu-utils
+      
+      - name: Download OpenWrt 25.12.5 SDK
         run: |
-          SDK_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/generic/"
-          SDK_FILE=$(curl -sL "$SDK_URL" | grep -oP 'openwrt-sdk-[^\"]+\.tar\.xz' | head -1)
-          if [ -z "$SDK_FILE" ]; then
-            echo "::error::未找到对应 SDK，请检查 OPENWRT_VERSION 和 TARGET 是否正确"
-            exit 1
-          fi
-          echo "Downloading $SDK_FILE ..."
-          wget -q "${SDK_URL}${SDK_FILE}"
-          tar xf "$SDK_FILE"
-          mv openwrt-sdk-* sdk
+          # 使用正式发布版的SDK路径
+          SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.xz"
+          echo "Downloading SDK from: $SDK_URL"
+          wget -q "$SDK_URL" -O sdk.tar.xz
+          tar -xf sdk.tar.xz
+          # 动态获取解压后的SDK目录名，避免硬编码
+          echo "SDK_DIR=$(ls -d openwrt-sdk-* | head -n1)" >> $GITHUB_ENV
 
-      - name: Clone natmapt source
+      - name: Configure custom feed and package
         run: |
-          cd sdk
-          git clone --depth 1 --branch master --single-branch \
-            ${{ env.REPO_URL }} package/natmapt
-
-      - name: Configure & Compile
-        run: |
-          cd sdk
-          make defconfig
+          cd ${{ env.SDK_DIR }}
+          
+          # 更新官方base和packages源 (使用正确的release路径)
+          sed -i 's|https://downloads.openwrt.org/snapshots/|https://downloads.openwrt.org/releases/25.12.5/|g' feeds.conf.default
+          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 启用 natmapt 模块编译
-          sed -i 's/^# CONFIG_PACKAGE_natmapt is not set/CONFIG_PACKAGE_natmapt=m/' .config
-          make package/natmapt/compile V=99 -j$(nproc)
 
-      - name: Upload APK artifact
+          # 克隆或复制你的 natmapt 包源码到 package/feeds/custom/
+          # 示例：git clone https://github.com/your-repo/natmapt.git package/feeds/custom/natmapt
+          
+          # 生成默认配置并选择natmapt
+          make defconfig
+          echo "CONFIG_PACKAGE_natmapt=y" >> .config
+          make defconfig
+
+      - name: Compile natmapt
+        run: |
+          cd ${{ env.SDK_DIR }}
+          # V=s 输出详细日志便于排查，单线程编译提高稳定性
+          make package/natmapt/compile V=s -j1
+
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: natmapt-apk-${{ env.TARGET }}
-          path: sdk/bin/packages/*/base/natmapt-*.apk
+          name: natmapt-openwrt-25.12.5-x86_64
+          # 匹配所有生成的apk文件，包括主程序和依赖
+          path: |
+            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/natmapt*.apk
+            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libmbedtls*.apk
+            ${{ env.SDK_DIR }}/bin/packages/x86_64/base/libjson-c*.apk
           retention-days: 7
+          if-no-files-found: error
