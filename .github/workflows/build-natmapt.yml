@@ -23,7 +23,7 @@ jobs:
       - name: Download OpenWrt 25.12.5 SDK
         run: |
           # ⚠️ 请务必先在浏览器验证此URL是否有效！
-          SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.xz"
+          SDK_URL="https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           
           echo "Checking SDK availability..."
           HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" "$SDK_URL")
