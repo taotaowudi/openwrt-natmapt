@@ -1,0 +1,105 @@
+name: Build OpenWrt APK
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.sdk_arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk_url: https://downloads.openwrt.org/releases/25.12.0/targets/x86/64/openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sdk_arch: x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
+            gettext git java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev python3 python3-distutils python3-setuptools \
+            rsync subversion swig time unzip wget xsltproc zlib1g-dev zstd
+
+      - name: Download OpenWrt SDK
+        run: |
+          wget -q "${{ matrix.sdk_url }}" -O sdk.tar.zst
+          mkdir -p sdk
+          tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+      - name: Prepare SDK feeds
+        working-directory: sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Copy package into SDK
+        run: |
+          rm -rf sdk/package/natmapt
+          mkdir -p sdk/package/natmapt
+          rsync -av --exclude='.git' --exclude='sdk' ./ sdk/package/natmapt/
+
+      - name: Generate dummy APK signing keys
+        working-directory: sdk
+        run: |
+          openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem
+          openssl ec -in private-key.pem -pubout -out public-key.pem
+
+      - name: Configure package
+        working-directory: sdk
+        run: |
+          make defconfig
+          echo "CONFIG_USE_APK=y" >> .config
+          echo "CONFIG_PACKAGE_natmapt=m" >> .config
+          make defconfig
+
+      - name: Build package
+        working-directory: sdk
+        run: |
+          make package/natmapt/compile V=s -j$(nproc) 2>&1 | tee build.log
+
+      - name: Collect APK files
+        run: |
+          mkdir -p artifacts
+          find sdk/bin -name "*.apk" -exec cp {} artifacts/ \;
+          ls -lh artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.sdk_arch }}
+          path: artifacts/*.apk
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.sdk_arch }}
+          path: sdk/build.log
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Build {0}', github.run_number) }}
+          files: artifacts/*.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
