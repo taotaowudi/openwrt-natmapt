@@ -34,11 +34,41 @@ jobs:
             libncursesw5-dev libssl-dev python3 python3-setuptools \
             rsync subversion swig time unzip wget xsltproc zlib1g-dev zstd
 
+      # ---------- 缓存 1: 下载好的 SDK 压缩包 ----------
+      - name: Cache SDK tarball
+        id: cache-sdk-tarball
+        uses: actions/cache@v4
+        with:
+          path: sdk.tar.zst
+          key: sdk-tarball-${{ matrix.sdk_arch }}-25.12.0
+
       - name: Download OpenWrt SDK
+        if: steps.cache-sdk-tarball.outputs.cache-hit != 'true'
         run: |
           wget -q "${{ matrix.sdk_url }}" -O sdk.tar.zst
+
+      - name: Extract SDK
+        run: |
           mkdir -p sdk
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+
+      # ---------- 缓存 2: feeds (dl 目录) ----------
+      - name: Cache feeds
+        uses: actions/cache@v4
+        with:
+          path: sdk/dl
+          key: feeds-${{ matrix.sdk_arch }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            feeds-${{ matrix.sdk_arch }}-
+
+      # ---------- 缓存 3: ccache 编译缓存 ----------
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.sdk_arch }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.sdk_arch }}-
 
       - name: Prepare SDK feeds
         working-directory: sdk
@@ -58,18 +88,30 @@ jobs:
           openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem
           openssl ec -in private-key.pem -pubout -out public-key.pem
 
+      - name: Configure ccache
+        run: |
+          mkdir -p ~/.ccache
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+
       - name: Configure package
         working-directory: sdk
         run: |
           make defconfig
           echo "CONFIG_USE_APK=y" >> .config
           echo "CONFIG_PACKAGE_natmapt=m" >> .config
+          # 启用 ccache
+          echo "CONFIG_CCACHE=y" >> .config
           make defconfig
 
       - name: Build package
         working-directory: sdk
         run: |
+          export CCACHE_DIR=$HOME/.ccache
           make package/natmapt/compile V=s -j$(nproc) 2>&1 | tee build.log
+
+      - name: ccache stats
+        run: ccache --show-stats
 
       - name: Collect APK files
         run: |
